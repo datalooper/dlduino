@@ -1,23 +1,4 @@
-
-
-
-/* Simple Teensy DIY USB-MIDI controller.
-  Created by Liam Lacey, based on the Teensy USB-MIDI Buttons example code.
-
-   Contains 8 push buttons for sending MIDI messages,
-   and a toggle switch for setting whether the buttons
-   send note messages or CC messages.
-
-   The toggle switch is connected to input pin 0,
-   and the push buttons are connected to input pins 1 - 8.
-
-   You must select MIDI from the "Tools > USB Type" menu for this code to compile.
-
-   To change the name of the USB-MIDI device, edit the STR_PRODUCT define
-   in the /Applications/Arduino.app/Contents/Java/hardware/teensy/avr/cores/usb_midi/usb_private.h
-   file. You may need to clear your computers cache of MIDI devices for the name change to be applied.
-
-   See https://www.pjrc.com/teensy/td_midi.html for the Teensy MIDI library documentation.
+/* DataLooper Firmware V1.0
 
 */
 #include <Bounce2.h>
@@ -30,29 +11,36 @@ const int LED_PINS = 3;
 const int NUM_CONTROLS = 4;
 const int CONFIG_ADDRESS = 0;
 const int MASTER_STOP_NOTE_VAL = 127;
+
 //button debounce time
 const int DEBOUNCE_TIME = 50;
 const int DOUBLE_HIT_TIME = 1500;
+
 // the MIDI channel number to send messages
 const int MIDI_CHAN = 14;
+
 //DOWNBEAT BLINK TIME
 const int BLINK_TIME = 50;
+
 //STATE CONST
 const int STOPPED = 0;
 const int RECORDING = 1;
 const int PLAYING = 2;
 const int OVERDUBBING = 3;
 const int CLEAR = 4;
+
 //LOOPER COMMAND
 const int RESET = 0;
 const int CHANGE_STATE = 1;
 const int DOWNBEAT = 2;
+
 //SYSEX STUFF
 int looperNum = 0;
 int looperCommand = 0;
 int instance;
 
 boolean configActive = false;
+unsigned long configOffDelay = -1;
 boolean onBeat = false;
 unsigned long beat_time = 0;     
 
@@ -64,6 +52,21 @@ const int YELLOW = 3;
 const int WHT = 4;
 const int NONE = 5;
 const int PURPLE = 6;
+
+//PIN CONFIG
+int led1[LED_PINS] = {3, 4, 6};
+int loop1controls[NUM_CONTROLS] = {0, 1, 2, 5};
+
+int led2[LED_PINS] = {9, 10, 16};
+int loop2controls[NUM_CONTROLS] = {7, 8, 11, 12};
+
+int led3[LED_PINS] = {17, 20, 22};
+int loop3controls[NUM_CONTROLS] = {13, 14, 15, 18};
+
+long master_stop_time = -1;
+long loop_stop_time = -1;
+long config_press_time = -1;
+
 
 class Led
 {
@@ -77,36 +80,31 @@ class Led
         pinMode(pins[n], OUTPUT);
       }
     }
-    void setColor(int color) {
+    void writeColor(int color){
       if (color == GREEN) {
-        analogWrite(pins[RED], 255);
-        analogWrite(pins[GREEN], 100);
-        analogWrite(pins[BLUE], 255);
+        writeColor(255,100,255);
       } else if (color == RED) {
-        analogWrite(pins[RED], 100);
-        analogWrite(pins[GREEN], 255);
-        analogWrite(pins[BLUE], 255);
+        writeColor(100,255,255);
       } else if (color == BLUE) {
-        analogWrite(pins[RED], 255);
-        analogWrite(pins[GREEN], 255);
-        analogWrite(pins[BLUE], 100);
+        writeColor(255,255,100);
       } else if (color == YELLOW) {
-        analogWrite(pins[RED], 100);
-        analogWrite(pins[GREEN], 100);
-        analogWrite(pins[BLUE], 255);
+        writeColor(100,100,255);
       } else if (color == WHT) {
-        analogWrite(pins[RED], 100);
-        analogWrite(pins[GREEN], 100);
-        analogWrite(pins[BLUE], 100);
+        writeColor(100,100,100);
       } else if (color == NONE) {
-        analogWrite(pins[RED], 255);
-        analogWrite(pins[GREEN], 255);
-        analogWrite(pins[BLUE], 255);
+        writeColor(255,255,255);
       } else if (color == PURPLE) {
-        analogWrite(pins[RED], 100);
-        analogWrite(pins[GREEN], 255);
-        analogWrite(pins[BLUE], 100);
+        writeColor(100,255,100);
       } 
+    }
+    void setColor(int color) {
+      curColor = color;
+      writeColor(color);
+    }
+   void writeColor(int red, int green, int blue){
+      analogWrite(pins[RED], red);
+      analogWrite(pins[GREEN], green);
+      analogWrite(pins[BLUE], blue);
     }
     void restoreColor() {
       setColor(curColor);
@@ -127,6 +125,8 @@ class Looper
       Bounce (),
       Bounce ()
     };
+    boolean is_pressed[NUM_CONTROLS] = {false, false, false, false};
+    long press_time[NUM_CONTROLS];
     Looper(int ledPins[], int controlPins[], int looperNum, int instance) {
       led = new Led(ledPins);
       controls = controlPins;
@@ -143,43 +143,24 @@ class Looper
    }
 };
 
-
-//PIN CONFIG
-int led1[LED_PINS] = {3, 4, 6};
-int loop1controls[NUM_CONTROLS] = {0, 1, 2, 5};
-
-int led2[LED_PINS] = {9, 10, 16};
-int loop2controls[NUM_CONTROLS] = {7, 8, 11, 12};
-
-int led3[LED_PINS] = {17, 20, 22};
-int loop3controls[NUM_CONTROLS] = {13, 14, 15, 18};
-
 Looper *loopers[NUM_LOOPERS];
-
 
 void setup()
 {
-  // Configure the pins for input mode with pullup resistors.
-  // The buttons/switch connect from each pin to ground.  When
-  // the button is pressed/on, the pin reads LOW because the button
-  // shorts it to ground.  When released/off, the pin reads HIGH
-  // because the pullup resistor connects to +5 volts inside
-  // the chip.  LOW for "on", and HIGH for "off" may seem
-  // backwards, but using the on-chip pullup resistors is very
-  // convenient.  The scheme is called "active low", and it's
-  // very commonly used in electronics... so much that the chip
-  // has built-in pullup resistors!
-
   Serial.begin(9600); // USB is always 12 Mbit/sec
-  
+
+  //Checks for stored config value
   instance = EEPROM.read(CONFIG_ADDRESS);
   if(instance == 255){
     EEPROM.write(CONFIG_ADDRESS, 0);
   }
 
+  //initializes new loopers
   loopers[0] = new Looper(led1, loop1controls, 0, instance);
   loopers[1] = new Looper(led2, loop2controls, 1, instance);
   loopers[2] = new Looper(led3, loop3controls, 2, instance);
+
+  //registers sysex handler
   usbMIDI.setHandleSystemExclusive(onSysEx);
 }
 
@@ -187,12 +168,13 @@ void loop()
 {
   
   unsigned long current_time = millis();
-
+  
   if(onBeat){
     beat_time = current_time;
     onBeat = false;
   }
-  if (current_time - beat_time >= BLINK_TIME && !configActive) {
+  
+  if (current_time - beat_time >= BLINK_TIME) {
     for (int i = 0; i < NUM_LOOPERS; i++)
     {
       loopers[i]->led->restoreColor();
@@ -200,10 +182,17 @@ void loop()
   } else if(!configActive) {
     for (int i = 0; i < NUM_LOOPERS; i++)
     {
-      loopers[i]->led->setColor(NONE);
+      loopers[i]->led->writeColor(NONE);
     }
   }
 
+  if(configActive &&  configOffDelay != -1 && current_time - configOffDelay >= 2000){
+        for( int x = 0; x < NUM_LOOPERS; x++){
+          loopers[x]->led->setColor(WHT);
+          configActive = false;
+        }
+    configOffDelay = -1;
+  }
   //==============================================================================
   // Update all the buttons/switch. There should not be any long
   // delays in loop(), so this runs repetitively at a rate
@@ -214,40 +203,23 @@ void loop()
     for (int n = 0; n < NUM_CONTROLS; n++) {
       loopers[i]->buttons[n].update();
 
+      //Buttons accidentely backwards on loop 3 in v1.1; here's the software fix; oops.
       if ((i == NUM_LOOPERS-1 && loopers[i]->buttons[n].fallingEdge()) || ( i != NUM_LOOPERS-1 && loopers[i]->buttons[n].risingEdge()))
       {
-        onButtonPress(i, n);
-
-        if(i == 0 && n == 3){
-          configActive = true;
-        }
-
-        if(configActive == true && i == NUM_LOOPERS - 1){
-          Serial.print("configuring looper as: ");
-          Serial.print(n);
-          EEPROM.write(CONFIG_ADDRESS, n);
-          for (int l = 0; l < NUM_LOOPERS; l++){
-            loopers[l]->led->setColor(PURPLE);
-            loopers[l] -> configureLooper(l, n);
-          }
-        }
+        onButtonPress(i, n, current_time);
       }
       else if ((i == NUM_LOOPERS-1 && loopers[i]->buttons[n].risingEdge()) || ( i != NUM_LOOPERS-1 && loopers[i]->buttons[n].fallingEdge()))
       {
         usbMIDI.sendNoteOff (loopers[i]->ccs[n], 0, MIDI_CHAN);
+        loopers[i]->is_pressed[n] = false;
+        loopers[i]->press_time[n] = -1;
+      }
 
-        if(i == 0 && n == 3){
-          configActive = false;
-        }
+      if(loopers[0]->is_pressed[3] && current_time - loopers[0]->press_time[3] >= 5000 && !configActive){
+        enterConfig();
       }
     }
   }
-
-
-  //Buttons accidentely backwards on loop 3 in v1.1; here's the software fix; oops.
-  
-
-
   
   while (usbMIDI.read())
   {
@@ -256,47 +228,75 @@ void loop()
 
 }
 
-unsigned long transport_stop_double_hit_timer = 0;
-unsigned long loop_stop_double_hit_timer = 0;
-
-boolean checkMasterStop(int curLooper, int curControl, int looperNum, int controlNum, unsigned long &counter){
-  if (curLooper == looperNum && curControl == controlNum && counter == 0) {
-    counter = millis();
-    return false;
-  } else if (curLooper == looperNum && curControl == controlNum && (millis() - counter < DOUBLE_HIT_TIME)) {
-    Serial.println();
-    Serial.print("curLooper=");
-    Serial.print(curLooper);
-    counter = 0;
-    return true;
-  } else if (counter != 0 && (millis() - counter >= 1000)) {
-    counter = 0;
-    return false;
-  }
-}
-void onButtonPress(int i, int n){
+void onButtonPress(int i, int n, long current_time){
   //diagnoseButton(i,n, loopers[i]->ccs[n]);
-  if (n == 3 && loopers[i]->state != OVERDUBBING) {
-    loopers[i]->led->curColor = WHT;
-    loopers[i]->isClear = true;
-  }
-  if(checkMasterStop(i,n, 0, 1, transport_stop_double_hit_timer)){
-    Serial.println();
+  //Marks time that button was initially pressed
+  if(!loopers[i]->is_pressed[n]){
     Serial.print(i);
-    Serial.print(" ");
-    Serial.print(n);
-    Serial.print(" stopping all");
-    loopStop();
-    transportStop();
-  } 
-  else if(checkMasterStop(i,n, 1, 1, loop_stop_double_hit_timer)){
-    Serial.print("stopping loops");
-    loopStop();
-  } 
-  else{
+      Serial.print("Pressed: ");
+      Serial.print(n);
+      Serial.println();
+      Serial.print(current_time);
+      loopers[i]->press_time[n] = current_time;
+      loopers[i]->is_pressed[n] = true; 
+  }
+  
+  //default send note message 
+  if(checkSpecialFeatures(current_time, i, n)){
+    //Turns LED white if clear is pressed; no state listener for clearing Ableton Looper, so we just assume it will clear. Need to build custom plugin to fix this
+    if (n == 3 && loopers[i]->state != OVERDUBBING) {
+      loopers[i]->led->curColor = WHT;
+      loopers[i]->isClear = true;
+    }
     usbMIDI.sendNoteOn (loopers[i]->ccs[n], 127, MIDI_CHAN);
   }
 
+}
+
+bool checkSpecialFeatures(long current_time, int looper, int controlNum){
+  if(configActive){
+    configureLooper(looper, controlNum);
+    return false;
+  } else{
+    //Checks for double press, debounces for 1 second
+    if(loopers[0]->is_pressed[1] && loopers[1]->is_pressed[1] && current_time - master_stop_time >= 1000 ){
+      Serial.print("master stop");
+      master_stop_time = current_time;
+      loopStop();
+      transportStop();   
+      return false;
+    }
+    if(loopers[1]->is_pressed[1] && loopers[2]->is_pressed[1] && current_time - loop_stop_time >= 1000){
+      Serial.print("loop stop");
+      loop_stop_time = current_time;
+      loopStop();
+      return false;
+  
+    }
+    if(loopers[0]->is_pressed[3]){
+      Serial.print(current_time - loopers[0]->press_time[3]);
+    }
+    
+    return true; 
+  }
+}
+void enterConfig(){
+  configActive = true;
+  Serial.print("Entering config");
+  for (int l = 0; l < NUM_LOOPERS; l++){
+    loopers[l]->led->setColor(PURPLE);
+  }
+}
+void configureLooper(int i,int n){
+  int configAddress = ( i * NUM_CONTROLS) + n;
+  Serial.print("configuring looper as: ");
+  Serial.print(configAddress);
+  EEPROM.write(CONFIG_ADDRESS, configAddress);
+  for( int x = 0; x < NUM_LOOPERS; x++){
+    loopers[x]->configureLooper(x, configAddress);
+    loopers[x]->led->setColor(GREEN);
+    configOffDelay = millis();
+  }
 }
 void diagnoseButton(int i, int n, int num){
   Serial.print("looper:");
@@ -352,17 +352,6 @@ void transportStop(){
 }
 
 
-void master_clear() {
-
-  Serial.print("MASTER CLEAR");
-  //usbMIDI.sendNoteOn (MIDI_CC_NUMS[LOOP_2_CLEAR], 127, MIDI_CHAN);
-  //usbMIDI.sendNoteOff (MIDI_CC_NUMS[LOOP_2_CLEAR], 0, MIDI_CHAN);
-  //usbMIDI.sendNoteOn (MIDI_CC_NUMS[LOOP_1_CLEAR], 127, MIDI_CHAN);
-  //usbMIDI.sendNoteOff (MIDI_CC_NUMS[LOOP_1_CLEAR], 0, MIDI_CHAN);
-  //loopclear[0] = true;
-  //loopclear[1] = true;
-  //loopclear[2] = true;
-}
 
 
 
