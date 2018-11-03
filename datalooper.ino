@@ -1,5 +1,8 @@
 /* DataLooper Firmware V1.0
-
+  Experimental branch: 
+  Loop 1 clear stops clock
+  Loop 2 clear stops all loops
+  Loop 3 clear mutes all loops while held down
 */
 #include <Bounce2.h>
 #include <EEPROM.h>
@@ -11,6 +14,7 @@ const int LED_PINS = 3;
 const int NUM_CONTROLS = 4;
 const int CONFIG_ADDRESS = 0;
 const int MASTER_STOP_NOTE_VAL = 127;
+const int MASTER_MUTE_CC_VAL = 126;
 
 //button debounce time
 const int DEBOUNCE_TIME = 50;
@@ -206,20 +210,39 @@ void loop()
       //Buttons accidentely backwards on loop 3 in v1.1; here's the software fix; oops.
       if ((i == NUM_LOOPERS-1 && loopers[i]->buttons[n].fallingEdge()) || ( i != NUM_LOOPERS-1 && loopers[i]->buttons[n].risingEdge()))
       {
+        //On press
         onButtonPress(i, n, current_time);
       }
       else if ((i == NUM_LOOPERS-1 && loopers[i]->buttons[n].risingEdge()) || ( i != NUM_LOOPERS-1 && loopers[i]->buttons[n].fallingEdge()))
       {
+        //On release
+        if(n==1 && current_time - loopers[i]->press_time[n] < 1000){
+          Serial.print("sending stop");
+          if(loopers[i]->state == RECORDING){
+            clearLoop(i);
+          } else{
+            usbMIDI.sendNoteOn (loopers[i]->ccs[n], 127, MIDI_CHAN);
+          }
+        }
+       
         usbMIDI.sendNoteOff (loopers[i]->ccs[n], 0, MIDI_CHAN);
         loopers[i]->is_pressed[n] = false;
         loopers[i]->press_time[n] = -1;
       }
-
-      if(loopers[0]->is_pressed[3] && current_time - loopers[0]->press_time[3] >= 5000 && !configActive){
-        enterConfig();
+    }  
+    
+      if(loopers[i]->is_pressed[1] && current_time - loopers[i]->press_time[1] >= 1000){
+          clearLoop(i);
+          loopers[i]->is_pressed[1] = false;
       }
-    }
   }
+  //Checks if looper 1 clear button held for 5 seconds
+  if(loopers[0]->is_pressed[3] && current_time - loopers[0]->press_time[3] >= 5000 && !configActive){
+    enterConfig();
+  } else if(loopers[0]->is_pressed[3] && current_time - loopers[0]->press_time[3] >= 1000 && !configActive){
+      clearLoops(false);
+  }
+       
   
   while (usbMIDI.read())
   {
@@ -232,23 +255,17 @@ void onButtonPress(int i, int n, long current_time){
   //diagnoseButton(i,n, loopers[i]->ccs[n]);
   //Marks time that button was initially pressed
   if(!loopers[i]->is_pressed[n]){
-    Serial.print(i);
-      Serial.print("Pressed: ");
-      Serial.print(n);
-      Serial.println();
-      Serial.print(current_time);
       loopers[i]->press_time[n] = current_time;
       loopers[i]->is_pressed[n] = true; 
   }
   
   //default send note message 
   if(checkSpecialFeatures(current_time, i, n)){
-    //Turns LED white if clear is pressed; no state listener for clearing Ableton Looper, so we just assume it will clear. Need to build custom plugin to fix this
-    if (n == 3 && loopers[i]->state != OVERDUBBING) {
-      loopers[i]->led->curColor = WHT;
-      loopers[i]->isClear = true;
+    //Don't send undo until release, because 2 second hold sends out clear
+    if( n != 1 && n != 3){  
+      usbMIDI.sendNoteOn (loopers[i]->ccs[n], 127, MIDI_CHAN);
     }
-    usbMIDI.sendNoteOn (loopers[i]->ccs[n], 127, MIDI_CHAN);
+   
   }
 
 }
@@ -258,27 +275,40 @@ bool checkSpecialFeatures(long current_time, int looper, int controlNum){
     configureLooper(looper, controlNum);
     return false;
   } else{
-    //Checks for double press, debounces for 1 second
-    if(loopers[0]->is_pressed[1] && loopers[1]->is_pressed[1] && current_time - master_stop_time >= 1000 ){
-      Serial.print("master stop");
-      master_stop_time = current_time;
-      loopStop();
-      transportStop();   
+    if(controlNum == 3){
+      if(looper == 0){
+        Serial.print("stop transport");
+        loopStop();
+        transportStop();
+      } else if(looper == 1){
+        Serial.print("stop loops");
+        loopStop();
+      } else if(looper == 2){
+        Serial.print("mute tracks");
+        usbMIDI.sendControlChange (MASTER_MUTE_CC_VAL, 127, MIDI_CHAN);        
+      }
       return false;
     }
-    if(loopers[1]->is_pressed[1] && loopers[2]->is_pressed[1] && current_time - loop_stop_time >= 1000){
-      Serial.print("loop stop");
-      loop_stop_time = current_time;
-      loopStop();
-      return false;
-  
-    }
-    if(loopers[0]->is_pressed[3]){
-      Serial.print(current_time - loopers[0]->press_time[3]);
-    }
-    
-    return true; 
+    return true;
   }
+}
+void clearLoops(boolean hardClear){
+  Serial.print("clearing loops");
+  for (int i = 0; i < NUM_LOOPERS; i++)
+      {
+        if(hardClear || !loopers[i]->isClear){
+          clearLoop(i);
+        }
+      }
+}
+void clearLoop(int i){
+      //Turns LED white if clear is pressed; no state listener for clearing Ableton Looper, so we just assume it will clear. Need to build custom plugin to fix this
+    if (loopers[i]->state != OVERDUBBING) {
+      Serial.print("sending clear");
+      loopers[i]->led->curColor = WHT;
+      loopers[i]->isClear = true;
+      usbMIDI.sendNoteOn (loopers[i]->ccs[3], 127, MIDI_CHAN);
+    } 
 }
 void enterConfig(){
   configActive = true;
@@ -288,12 +318,12 @@ void enterConfig(){
   }
 }
 void configureLooper(int i,int n){
-  int configAddress = ( i * NUM_CONTROLS) + n;
+  instance = ( i * NUM_CONTROLS) + n;
   Serial.print("configuring looper as: ");
-  Serial.print(configAddress);
-  EEPROM.write(CONFIG_ADDRESS, configAddress);
+  Serial.print(instance);
+  EEPROM.write(CONFIG_ADDRESS, instance);
   for( int x = 0; x < NUM_LOOPERS; x++){
-    loopers[x]->configureLooper(x, configAddress);
+    loopers[x]->configureLooper(x, instance);
     loopers[x]->led->setColor(GREEN);
     configOffDelay = millis();
   }
@@ -336,6 +366,12 @@ void onSysEx(byte* sysExData, unsigned int sysExSize)
       loopers[looperAddress]->led->curColor = YELLOW;
     } else if (sysExData[6] == CLEAR) {
       loopers[looperAddress]->led->curColor = WHT;
+    }
+  }
+  else if (looperCommand == RESET){
+    clearLoops(true);
+    for (int i = 0; i < NUM_LOOPERS; i++){
+      loopers[i]->led->curColor = WHT; 
     }
   }
 }
